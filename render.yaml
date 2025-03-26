@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: gestprojets-backend
+    env: java
+    plan: free
+    branch: main
+    repo: https://github.com/ayolamoiselab-dot/gestprojetsSwing-backend
+    buildCommand: ./mvnw clean package -DskipTests
+    startCommand: java -jar target/demo-0.0.1-SNAPSHOT.jar
+    envVars:
+      - key: JAVA_VERSION
+        value: 21
+      - key: FIREBASE_API_KEY
+        value: AIzaSyDib42OIcXpJDePgJea920plc2hrKX0L1Y
+      - key: GMAIL_PASSWORD
+        value: jnknaxrztjtkfqgl
