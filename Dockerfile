@@ -1,12 +1,21 @@
-# Étape 1 : Construire l'application avec Maven
-FROM maven:3.9.9-eclipse-temurin-17 AS build
+# Utilise une image Java officielle
+FROM openjdk:21-jdk-slim
+
+# Définit le répertoire de travail
 WORKDIR /app
+
+# Copie le projet dans le conteneur
 COPY . .
+
+# Installe Maven et construit le projet
+RUN apt-get update && apt-get install -y maven
 RUN mvn clean package -DskipTests
 
-# Étape 2 : Créer l'image finale
-FROM openjdk:17-jdk-slim
-WORKDIR /app
-COPY --from=build /app/target/demo-0.0.1-SNAPSHOT.jar app.jar
+# Copie le JAR généré
+COPY target/demo-0.0.1-SNAPSHOT.jar app.jar
+
+# Expose le port
 EXPOSE 8080
+
+# Commande pour lancer l’application
 ENTRYPOINT ["java", "-jar", "app.jar"]
