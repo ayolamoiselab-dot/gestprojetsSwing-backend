@@ -7,11 +7,13 @@ WORKDIR /app
 # Copie le projet dans le conteneur
 COPY . .
 
-# Installe Maven et construit le projet
+# Installe Maven
 RUN apt-get update && apt-get install -y maven
+
+# Construit le projet avec Maven
 RUN mvn clean package -DskipTests
 
-# Copie le JAR généré
+# Copie le JAR généré (ajuste le nom si nécessaire)
 COPY target/demo-0.0.1-SNAPSHOT.jar app.jar
 
 # Expose le port
