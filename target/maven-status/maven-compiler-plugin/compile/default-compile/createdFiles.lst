@@ -1,0 +1,6 @@
+com\example\demo\config\TemporaryUserStorage.class
+com\example\demo\GestprojetsApplication.class
+com\example\demo\config\TemporaryUserStorage$UserData.class
+com\example\demo\controller\SignupController.class
+com\example\demo\controller\SignupController$1.class
+com\example\demo\config\FirebaseInitializer.class
