@@ -1,0 +1,160 @@
+package com.example.demo.controller;
+
+import com.google.cloud.firestore.Firestore;
+import com.google.firebase.auth.FirebaseAuth;
+import com.google.firebase.auth.FirebaseAuthException;
+import com.google.firebase.auth.UserRecord;
+import com.google.firebase.cloud.FirestoreClient;
+import com.example.demo.config.TemporaryUserStorage;
+import org.json.JSONObject;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import javax.mail.*;
+import javax.mail.internet.InternetAddress;
+import javax.mail.internet.MimeMessage;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Properties;
+
+@RestController
+@RequestMapping("/api")
+public class SignupController {
+
+    //private static final String FIREBASE_API_KEY = "AIzaSyDib42OIcXpJDePgJea920plc2hrKX0L1Y"; // Remplace par ta clé API
+    private static final String FIREBASE_API_KEY = System.getenv("FIREBASE_API_KEY");
+    
+    @PostMapping("/signup")
+    public ResponseEntity<String> signup(@RequestBody String requestBody) {
+        try {
+            JSONObject json = new JSONObject(requestBody);
+            String fullName = json.getString("fullName");
+            String email = json.getString("email");
+            String password = json.getString("password");
+
+            UserRecord.CreateRequest request = new UserRecord.CreateRequest()
+                    .setEmail(email)
+                    .setPassword(password)
+                    .setDisplayName(fullName)
+                    .setEmailVerified(false);
+
+            UserRecord userRecord = FirebaseAuth.getInstance().createUser(request);
+            String uid = userRecord.getUid();
+
+            String verificationLink = FirebaseAuth.getInstance().generateEmailVerificationLink(email) + "&uid=" + uid;
+            TemporaryUserStorage.store(uid, fullName, email, password);
+
+            sendVerificationEmail(email, verificationLink);
+
+            // Retourner un JSON avec l'UID
+            JSONObject responseJson = new JSONObject();
+            responseJson.put("message", "User created, please verify your email.");
+            responseJson.put("uid", uid);
+            return ResponseEntity.ok(responseJson.toString());
+        } catch (FirebaseAuthException e) {
+            return ResponseEntity.status(400).body("{\"error\": \"Error creating user: " + e.getMessage() + "\"}");
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body("{\"error\": \"Server error: " + e.getMessage() + "\"}");
+        }
+    }
+
+    @GetMapping("/verify-email")
+    public ResponseEntity<String> verifyEmail(@RequestParam("uid") String uid, @RequestParam("oobCode") String oobCode) {
+        try {
+            boolean isVerified = verifyEmailWithOobCode(oobCode);
+
+            if (!isVerified) {
+                return ResponseEntity.status(400).body("{\"error\": \"Invalid or expired verification link.\"}");
+            }
+
+            UserRecord.UpdateRequest updateRequest = new UserRecord.UpdateRequest(uid)
+                    .setEmailVerified(true);
+            FirebaseAuth.getInstance().updateUser(updateRequest);
+
+            UserRecord userRecord = FirebaseAuth.getInstance().getUser(uid);
+            if (userRecord.isEmailVerified()) {
+                TemporaryUserStorage.UserData userData = TemporaryUserStorage.get(uid);
+                if (userData == null) {
+                    return ResponseEntity.status(400).body("{\"error\": \"User data not found.\"}");
+                }
+
+                Firestore db = FirestoreClient.getFirestore();
+                Map<String, Object> userMap = new HashMap<>();
+                userMap.put("fullName", userData.getFullName());
+                userMap.put("email", userData.getEmail());
+                userMap.put("createdAt", System.currentTimeMillis());
+
+                db.collection("users").document(uid).set(userMap);
+                TemporaryUserStorage.remove(uid);
+
+                return ResponseEntity.ok("{\"message\": \"Email verified, user created in Firestore.\"}");
+            } else {
+                return ResponseEntity.status(400).body("{\"error\": \"Email not yet verified.\"}");
+            }
+        } catch (FirebaseAuthException e) {
+            return ResponseEntity.status(400).body("{\"error\": \"Error verifying user: " + e.getMessage() + "\"}");
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body("{\"error\": \"Server error: " + e.getMessage() + "\"}");
+        }
+    }
+
+    @GetMapping("/check-verification-status")
+    public ResponseEntity<String> checkVerificationStatus(@RequestParam("uid") String uid) {
+        try {
+            UserRecord userRecord = FirebaseAuth.getInstance().getUser(uid);
+            JSONObject responseJson = new JSONObject();
+            responseJson.put("status", userRecord.isEmailVerified() ? "verified" : "pending");
+            return ResponseEntity.ok(responseJson.toString());
+        } catch (FirebaseAuthException e) {
+            return ResponseEntity.status(400).body("{\"error\": \"User not found: " + e.getMessage() + "\"}");
+        }
+    }
+
+    private boolean verifyEmailWithOobCode(String oobCode) throws Exception {
+        HttpClient client = HttpClient.newHttpClient();
+        String url = "https://identitytoolkit.googleapis.com/v1/accounts:update?key=" + FIREBASE_API_KEY;
+        JSONObject payload = new JSONObject();
+        payload.put("oobCode", oobCode);
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
+                .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        return response.statusCode() == 200;
+    }
+
+    private void sendVerificationEmail(String toEmail, String verificationLink) throws MessagingException {
+        String host = "smtp.gmail.com";
+        String from = "moiseayola6@gmail.com"; // Remplace par ton adresse Gmail
+        String password = "jnknaxrztjtkfqgl"; // Remplace par ton mot de passe d'application Gmail
+
+        Properties properties = new Properties();
+        properties.put("mail.smtp.host", host);
+        properties.put("mail.smtp.port", "587");
+        properties.put("mail.smtp.auth", "true");
+        properties.put("mail.smtp.starttls.enable", "true");
+
+        Session session = Session.getInstance(properties, new Authenticator() {
+            @Override
+            protected PasswordAuthentication getPasswordAuthentication() {
+                return new PasswordAuthentication(from, password);
+            }
+        });
+
+        MimeMessage message = new MimeMessage(session);
+        message.setFrom(new InternetAddress(from));
+        message.addRecipient(Message.RecipientType.TO, new InternetAddress(toEmail));
+        message.setSubject("Verify Your Email");
+        message.setText("Please click the following link to verify your email: " + verificationLink);
+
+        Transport.send(message);
+        System.out.println("Verification email sent to " + toEmail);
+    }
+}
