@@ -1,5 +1,6 @@
 package com.example.demo.controller;
 
+import com.google.cloud.firestore.DocumentSnapshot;
 import com.google.cloud.firestore.Firestore;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseAuthException;
@@ -25,9 +26,8 @@ import java.util.Properties;
 @RequestMapping("/api")
 public class SignupController {
 
-    //private static final String FIREBASE_API_KEY = "AIzaSyDib42OIcXpJDePgJea920plc2hrKX0L1Y"; // Remplace par ta clé API
     private static final String FIREBASE_API_KEY = System.getenv("FIREBASE_API_KEY");
-    
+
     @PostMapping("/signup")
     public ResponseEntity<String> signup(@RequestBody String requestBody) {
         try {
@@ -50,7 +50,6 @@ public class SignupController {
 
             sendVerificationEmail(email, verificationLink);
 
-            // Retourner un JSON avec l'UID
             JSONObject responseJson = new JSONObject();
             responseJson.put("message", "User created, please verify your email.");
             responseJson.put("uid", uid);
@@ -103,14 +102,74 @@ public class SignupController {
     }
 
     @GetMapping("/check-verification-status")
-    public ResponseEntity<String> checkVerificationStatus(@RequestParam("uid") String uid) {
+public ResponseEntity<String> checkVerificationStatus(@RequestParam("uid") String uid) {
+    try {
+        UserRecord userRecord = FirebaseAuth.getInstance().getUser(uid);
+        JSONObject responseJson = new JSONObject();
+        responseJson.put("status", userRecord.isEmailVerified() ? "verified" : "pending");
+        return ResponseEntity.ok(responseJson.toString());
+    } catch (FirebaseAuthException e) {
+        return ResponseEntity.status(400).body("{\"error\": \"User not found: " + e.getMessage() + "\"}");
+    }
+}
+
+    // Nouvel endpoint pour récupérer les informations de l'utilisateur
+    @GetMapping("/user/{uid}")
+    public ResponseEntity<String> getUser(@PathVariable("uid") String uid) {
         try {
-            UserRecord userRecord = FirebaseAuth.getInstance().getUser(uid);
+            Firestore db = FirestoreClient.getFirestore();
+            DocumentSnapshot document = db.collection("users").document(uid).get().get();
+            if (document.exists()) {
+                Map<String, Object> userData = document.getData();
+                JSONObject responseJson = new JSONObject();
+                responseJson.put("uid", uid);
+                responseJson.put("fullName", userData.get("fullName"));
+                responseJson.put("email", userData.get("email"));
+                responseJson.put("createdAt", userData.get("createdAt"));
+                return ResponseEntity.ok(responseJson.toString());
+            } else {
+                return ResponseEntity.status(404).body("{\"error\": \"User not found.\"}");
+            }
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body("{\"error\": \"Server error: " + e.getMessage() + "\"}");
+        }
+    }
+
+    // Nouvel endpoint pour gérer la connexion (optionnel, car on utilise directement l'API Firebase)
+    @PostMapping("/login")
+    public ResponseEntity<String> login(@RequestBody String requestBody) {
+        try {
+            JSONObject json = new JSONObject(requestBody);
+            String email = json.getString("email");
+            String password = json.getString("password");
+
+            HttpClient client = HttpClient.newHttpClient();
+            String signInUrl = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=" + FIREBASE_API_KEY;
+            JSONObject signInPayload = new JSONObject();
+            signInPayload.put("email", email);
+            signInPayload.put("password", password);
+            signInPayload.put("returnSecureToken", true);
+
+            HttpRequest signInRequest = HttpRequest.newBuilder()
+                    .uri(URI.create(signInUrl))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(signInPayload.toString()))
+                    .build();
+            HttpResponse<String> signInResponse = client.send(signInRequest, HttpResponse.BodyHandlers.ofString());
+
+            if (signInResponse.statusCode() != 200) {
+                return ResponseEntity.status(401).body("{\"error\": \"Invalid email or password.\"}");
+            }
+
+            JSONObject signInJson = new JSONObject(signInResponse.body());
+            String uid = signInJson.getString("localId");
+
             JSONObject responseJson = new JSONObject();
-            responseJson.put("status", userRecord.isEmailVerified() ? "verified" : "pending");
+            responseJson.put("message", "Login successful.");
+            responseJson.put("uid", uid);
             return ResponseEntity.ok(responseJson.toString());
-        } catch (FirebaseAuthException e) {
-            return ResponseEntity.status(400).body("{\"error\": \"User not found: " + e.getMessage() + "\"}");
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body("{\"error\": \"Server error: " + e.getMessage() + "\"}");
         }
     }
 
@@ -132,8 +191,8 @@ public class SignupController {
 
     private void sendVerificationEmail(String toEmail, String verificationLink) throws MessagingException {
         String host = "smtp.gmail.com";
-        String from = "moiseayola6@gmail.com"; // Remplace par ton adresse Gmail
-        String password = "jnknaxrztjtkfqgl"; // Remplace par ton mot de passe d'application Gmail
+        String from = "moiseayola6@gmail.com";
+        String password = System.getenv("GMAIL_PASSWORD");
 
         Properties properties = new Properties();
         properties.put("mail.smtp.host", host);
