@@ -68,7 +68,7 @@
                 </execution>
             </executions>
             <configuration>
-                <mainClass>GestprojetsApplication</mainClass>
+                <mainClass>com.example.demo.GestprojetsApplication</mainClass>
             </configuration>
             </plugin>
         </plugins>
