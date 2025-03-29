@@ -54,6 +54,12 @@
             <artifactId>javax.mail</artifactId>
             <version>1.6.2</version>
         </dependency>
+        <dependency>
+            <groupId>dev.gitlive</groupId>
+            <artifactId>firebase-java-sdk</artifactId>
+            <version>0.4.8</version>
+            <type>jar</type>
+        </dependency>
     </dependencies>
     <build>
         <plugins>
