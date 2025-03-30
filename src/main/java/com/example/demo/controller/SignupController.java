@@ -282,16 +282,16 @@ public class SignupController {
         return new JSONObject(response.body()).getString("access_token");
     }
 
-    @Configuration
-    public class CorsConfig implements WebMvcConfigurer {
-
-        @Override
-        public void addCorsMappings(CorsRegistry registry) {
-            registry.addMapping("/**")
-                    .allowedOrigins("https://gestprojetsswing-backend.onrender.com") // Autoriser votre app Swing
-                    .allowedMethods("GET", "POST");
-        }
+  @Configuration
+public class CorsConfig implements WebMvcConfigurer {
+    @Override
+    public void addCorsMappings(CorsRegistry registry) {
+        registry.addMapping("/**")
+                .allowedOrigins("*") // Pour le développement seulement
+                .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
+                .allowedHeaders("*");
     }
+}
 
     private void saveUserToFirestore(String uid, String email, String provider) throws Exception {
         Firestore db = FirestoreClient.getFirestore();
