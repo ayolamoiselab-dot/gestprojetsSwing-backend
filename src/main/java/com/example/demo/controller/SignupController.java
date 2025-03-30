@@ -2,14 +2,10 @@ package com.example.demo.controller;
 
 import com.google.cloud.firestore.DocumentSnapshot;
 import com.google.cloud.firestore.Firestore;
-import com.google.firebase.auth.FirebaseAuth;
-import com.google.firebase.auth.FirebaseAuthException;
-import com.google.firebase.auth.UserRecord;
+import com.google.firebase.auth.*;
 import com.google.firebase.cloud.FirestoreClient;
 import com.example.demo.config.TemporaryUserStorage;
-import com.google.firebase.auth.FirebaseToken;
 import jakarta.servlet.http.HttpServletResponse;
-import java.io.IOException;
 import org.json.JSONObject;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -21,6 +17,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
@@ -28,11 +25,19 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
+import jakarta.servlet.http.HttpServletRequest;
+import java.io.IOException;
+import java.net.URLEncoder;
+import java.util.UUID;
+import java.nio.charset.StandardCharsets;
+
 @RestController
 @RequestMapping("/api")
 public class SignupController {
 
     private static final String FIREBASE_API_KEY = System.getenv("FIREBASE_API_KEY");
+    // Classe interne pour gérer les credentials GitHub
+
 
     @PostMapping("/signup")
     public ResponseEntity<String> signup(@RequestBody String requestBody) {
@@ -119,7 +124,6 @@ public class SignupController {
         }
     }
 
-    // Nouvel endpoint pour récupérer les informations de l'utilisateur
     @GetMapping("/user/{uid}")
     public ResponseEntity<String> getUser(@PathVariable("uid") String uid) {
         try {
@@ -141,7 +145,6 @@ public class SignupController {
         }
     }
 
-    // Nouvel endpoint pour gérer la connexion (optionnel, car on utilise directement l'API Firebase)
     @PostMapping("/login")
     public ResponseEntity<String> login(@RequestBody String requestBody) {
         try {
@@ -179,6 +182,128 @@ public class SignupController {
         }
     }
 
+    @PostMapping("/social-auth")
+    public ResponseEntity<String> socialAuth(@RequestBody String requestBody) {
+        try {
+            JSONObject json = new JSONObject(requestBody);
+            String provider = json.getString("provider");
+            String idToken = json.getString("idToken");
+
+            FirebaseToken decodedToken = FirebaseAuth.getInstance().verifyIdToken(idToken);
+            String uid = decodedToken.getUid();
+
+            saveUserToFirestore(uid, decodedToken.getEmail(), provider);
+
+            JSONObject response = new JSONObject();
+            response.put("uid", uid);
+            response.put("email", decodedToken.getEmail());
+            response.put("fullName", decodedToken.getName());
+
+            return ResponseEntity.ok(response.toString());
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body("{\"error\": \"Erreur d'authentification: " + e.getMessage() + "\"}");
+        }
+    }
+
+    @GetMapping("/auth/callback")
+    public void handleCallback(
+            @RequestParam("code") String code,
+            @RequestParam("state") String state,
+            HttpServletResponse response) throws IOException {
+
+        try {
+            String decodedState = new String(Base64.getDecoder().decode(state));
+            JSONObject stateJson = new JSONObject(decodedState);
+            String provider = stateJson.getString("provider");
+
+            String accessToken = exchangeCodeForToken(provider, code);
+            String uid = createFirebaseUser(provider, accessToken);
+            String customToken = FirebaseAuth.getInstance().createCustomToken(uid);
+
+            jakarta.servlet.http.Cookie authCookie = new jakarta.servlet.http.Cookie("authToken", customToken);
+            authCookie.setHttpOnly(true);
+            authCookie.setSecure(true);
+            authCookie.setPath("/");
+            authCookie.setMaxAge(60 * 60 * 24);
+            response.addCookie(authCookie);
+
+            String redirectUrl = String.format(
+                "https://gestprojetsswing-backend.onrender.com/api/auth/complete?token=%s&uid=%s",
+                URLEncoder.encode(customToken, "UTF-8"),
+                URLEncoder.encode(uid, "UTF-8")
+            );
+            response.sendRedirect(redirectUrl);
+        } catch (Exception e) {
+            String errorRedirect = String.format(
+                "https://gestprojetsswing-backend.onrender.com/api/auth/complete?error=%s",
+                URLEncoder.encode(e.getMessage(), "UTF-8")
+            );
+            response.sendRedirect(errorRedirect);
+        }
+    }
+
+    @GetMapping("/auth/complete")
+    public ResponseEntity<String> authComplete(
+        @RequestParam(value = "token", required = false) String token,
+        @RequestParam(value = "uid", required = false) String uid,
+        @RequestParam(value = "error", required = false) String error) {
+        
+        if (error != null) {
+            return ResponseEntity.status(400).body("{\"error\": \"" + error + "\"}");
+        }
+        
+        JSONObject response = new JSONObject();
+        response.put("status", "success");
+        response.put("token", token);
+        response.put("uid", uid);
+        return ResponseEntity.ok(response.toString());
+    }
+
+    @GetMapping("/auth/{provider}")
+    public void authRedirect(@PathVariable String provider, HttpServletResponse response) throws IOException {
+        try {
+            String state = generateStateToken();
+            String authUrl = buildAuthUrl(provider, state);
+            response.sendRedirect(authUrl);
+        } catch (Exception e) {
+            response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+                    "Erreur lors de la génération de l'URL: " + e.getMessage());
+        }
+    }
+
+    @GetMapping("/check-auth-status")
+    public ResponseEntity<String> checkAuthStatus(HttpServletRequest request) {
+        try {
+            String idToken = extractToken(request);
+
+            if (idToken != null) {
+                FirebaseToken decodedToken = FirebaseAuth.getInstance().verifyIdToken(idToken);
+                String uid = decodedToken.getUid();
+
+                Firestore db = FirestoreClient.getFirestore();
+                DocumentSnapshot userDoc = db.collection("users").document(uid).get().get();
+
+                JSONObject response = new JSONObject();
+                response.put("isAuthenticated", true);
+                response.put("uid", uid);
+
+                if (userDoc.exists()) {
+                    Map<String, Object> userData = userDoc.getData();
+                    response.put("fullName", userData.getOrDefault("fullName", "User"));
+                } else {
+                    response.put("fullName", "User");
+                }
+
+                return ResponseEntity.ok(response.toString());
+            }
+
+            return ResponseEntity.ok("{\"isAuthenticated\": false}");
+        } catch (Exception e) {
+            return ResponseEntity.ok("{\"isAuthenticated\": false}");
+        }
+    }
+
+    // Méthodes utilitaires privées
     private boolean verifyEmailWithOobCode(String oobCode) throws Exception {
         HttpClient client = HttpClient.newHttpClient();
         String url = "https://identitytoolkit.googleapis.com/v1/accounts:update?key=" + FIREBASE_API_KEY;
@@ -220,46 +345,6 @@ public class SignupController {
         message.setText("Please click the following link to verify your email: " + verificationLink);
 
         Transport.send(message);
-        System.out.println("Verification email sent to " + toEmail);
-    }
-
-    @PostMapping("/social-auth")
-    public ResponseEntity<String> socialAuth(@RequestBody String requestBody) {
-        try {
-            JSONObject json = new JSONObject(requestBody);
-            String provider = json.getString("provider");
-            String idToken = json.getString("idToken"); // Modifié de accessToken à idToken
-
-            // Pas besoin de créer un AuthCredential si vous utilisez directement verifyIdToken
-            FirebaseToken decodedToken = FirebaseAuth.getInstance().verifyIdToken(idToken);
-            String uid = decodedToken.getUid();
-
-            // Sauvegarder dans Firestore
-            saveUserToFirestore(uid, decodedToken.getEmail(), provider);
-
-            JSONObject response = new JSONObject();
-            response.put("uid", uid);
-            response.put("email", decodedToken.getEmail());
-            response.put("fullName", decodedToken.getName()); // Peut être null
-
-            return ResponseEntity.ok(response.toString());
-        } catch (Exception e) {
-            return ResponseEntity.status(500).body("{\"error\": \"Erreur d'authentification: " + e.getMessage() + "\"}");
-        }
-    }
-
-    @PostMapping("/auth/{provider}")
-    public ResponseEntity<String> handleAuth(@PathVariable String provider, @RequestBody String code) {
-        try {
-            String accessToken = exchangeCodeForToken(provider, code);
-            FirebaseToken firebaseToken = FirebaseAuth.getInstance().verifyIdToken(accessToken);
-
-            saveUserToFirestore(firebaseToken.getUid(), firebaseToken.getEmail(), provider);
-
-            return ResponseEntity.ok("{\"uid\": \"" + firebaseToken.getUid() + "\"}");
-        } catch (Exception e) {
-            return ResponseEntity.status(401).body("{\"error\": \"" + e.getMessage() + "\"}");
-        }
     }
 
     private String exchangeCodeForToken(String provider, String code) throws Exception {
@@ -272,10 +357,10 @@ public class SignupController {
                 .uri(URI.create(tokenUrl))
                 .header("Accept", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(
-                        "client_id=" + System.getenv(provider.toUpperCase() + "_CLIENT_ID")
-                        + "&client_secret=" + System.getenv(provider.toUpperCase() + "_CLIENT_SECRET")
-                        + "&code=" + code
-                        + "&redirect_uri=https://gestprojetsswing-backend.onrender.com" // Doit correspondre à votre config
+                        "client_id=" + System.getenv(provider.toUpperCase() + "_CLIENT_ID") +
+                        "&client_secret=" + System.getenv(provider.toUpperCase() + "_CLIENT_SECRET") +
+                        "&code=" + code +
+                        "&redirect_uri=https://gestprojetsswing-backend.onrender.com"
                 ))
                 .build();
 
@@ -283,16 +368,29 @@ public class SignupController {
         return new JSONObject(response.body()).getString("access_token");
     }
 
-    @Configuration
-    public class CorsConfig implements WebMvcConfigurer {
+    private String buildAuthUrl(String provider, String state) {
+        String clientId = System.getenv(provider.toUpperCase() + "_CLIENT_ID");
+        String redirectUri = "https://gestprojetsswing-backend.onrender.com/api/auth/callback";
 
-        @Override
-        public void addCorsMappings(CorsRegistry registry) {
-            registry.addMapping("/**")
-                    .allowedOrigins("*") // Pour le développement seulement
-                    .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
-                    .allowedHeaders("*");
-        }
+        Map<String, String> stateData = new HashMap<>();
+        stateData.put("provider", provider);
+        stateData.put("firebaseType", "signIn");
+        stateData.put("stateToken", state);
+
+        String encodedState = Base64.getEncoder().encodeToString(
+                new JSONObject(stateData).toString().getBytes()
+        );
+
+        return provider.equalsIgnoreCase("github")
+                ? "https://github.com/login/oauth/authorize?client_id=" + clientId +
+                  "&redirect_uri=" + redirectUri +
+                  "&scope=user:email" +
+                  "&state=" + encodedState
+                : "https://accounts.google.com/o/oauth2/v2/auth?client_id=" + clientId +
+                  "&redirect_uri=" + redirectUri +
+                  "&response_type=code" +
+                  "&scope=email profile" +
+                  "&state=" + encodedState;
     }
 
     private void saveUserToFirestore(String uid, String email, String provider) throws Exception {
@@ -305,7 +403,6 @@ public class SignupController {
             userData.put("createdAt", System.currentTimeMillis());
             userData.put("provider", provider);
 
-            // Si vous voulez aussi stocker le nom (peut être null pour certains providers)
             try {
                 UserRecord userRecord = FirebaseAuth.getInstance().getUser(uid);
                 if (userRecord.getDisplayName() != null) {
@@ -319,29 +416,90 @@ public class SignupController {
         }
     }
 
-    private String buildAuthUrl(String provider) {
-        String clientId = System.getenv(provider.toUpperCase() + "_CLIENT_ID");
-        if (clientId == null) {
-            throw new RuntimeException("Configuration manquante: " + provider.toUpperCase() + "_CLIENT_ID");
+    private String createFirebaseUser(String provider, String accessToken) throws FirebaseAuthException, IOException, InterruptedException {
+        String email = getEmailFromProvider(provider, accessToken);
+        String uid = email.replaceAll("[^a-zA-Z0-9]", "_");
+
+        try {
+            UserRecord userRecord = FirebaseAuth.getInstance().getUserByEmail(email);
+            return userRecord.getUid();
+        } catch (FirebaseAuthException e) {
+            UserRecord.CreateRequest request = new UserRecord.CreateRequest()
+                    .setUid(uid)
+                    .setEmail(email)
+                    .setEmailVerified(true);
+
+            if (provider.equalsIgnoreCase("google")) {
+                request.setDisplayName(getGoogleUserName(accessToken));
+            }
+
+            UserRecord userRecord = FirebaseAuth.getInstance().createUser(request);
+            return userRecord.getUid();
         }
-
-        String redirectUri = "https://gestionprojetsswing.firebaseapp.com/__/auth/handler";
-
-        return provider.equalsIgnoreCase("github")
-                ? "https://github.com/login/oauth/authorize?client_id=" + clientId
-                + "&redirect_uri=" + redirectUri + "&scope=user:email"
-                : "https://accounts.google.com/o/oauth2/v2/auth?client_id=" + clientId
-                + "&redirect_uri=" + redirectUri + "&response_type=code&scope=email profile";
     }
 
-    @GetMapping("/auth/{provider}")
-    public void authRedirect(@PathVariable String provider, HttpServletResponse response) throws IOException {
-        try {
-            String authUrl = buildAuthUrl(provider);
-            response.sendRedirect(authUrl);
-        } catch (Exception e) {
-            response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-                    "Erreur lors de la génération de l'URL: " + e.getMessage());
+    private String getEmailFromProvider(String provider, String accessToken) throws IOException, InterruptedException {
+        HttpClient client = HttpClient.newHttpClient();
+        String userInfoUrl = provider.equalsIgnoreCase("github")
+                ? "https://api.github.com/user"
+                : "https://www.googleapis.com/oauth2/v3/userinfo";
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(userInfoUrl))
+                .header("Authorization", "Bearer " + accessToken)
+                .GET()
+                .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        JSONObject userInfo = new JSONObject(response.body());
+
+        return userInfo.getString("email");
+    }
+
+    private String getGoogleUserName(String accessToken) throws IOException, InterruptedException {
+        HttpClient client = HttpClient.newHttpClient();
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create("https://www.googleapis.com/oauth2/v3/userinfo"))
+                .header("Authorization", "Bearer " + accessToken)
+                .GET()
+                .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        JSONObject userInfo = new JSONObject(response.body());
+
+        return userInfo.optString("name", "User");
+    }
+
+    private String generateStateToken() {
+        return UUID.randomUUID().toString();
+    }
+
+    private String extractToken(HttpServletRequest request) {
+        String authHeader = request.getHeader("Authorization");
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            return authHeader.substring(7);
+        }
+
+        jakarta.servlet.http.Cookie[] cookies = request.getCookies();
+        if (cookies != null) {
+            for (jakarta.servlet.http.Cookie cookie : cookies) {
+                if ("authToken".equals(cookie.getName())) {
+                    return cookie.getValue();
+                }
+            }
+        }
+
+        return null;
+    }
+
+    @Configuration
+    public class CorsConfig implements WebMvcConfigurer {
+        @Override
+        public void addCorsMappings(CorsRegistry registry) {
+            registry.addMapping("/**")
+                    .allowedOrigins("*")
+                    .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
+                    .allowedHeaders("*");
         }
     }
 }
