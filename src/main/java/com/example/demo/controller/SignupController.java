@@ -8,6 +8,8 @@ import com.google.firebase.auth.UserRecord;
 import com.google.firebase.cloud.FirestoreClient;
 import com.example.demo.config.TemporaryUserStorage;
 import com.google.firebase.auth.FirebaseToken;
+import jakarta.servlet.http.HttpServletResponse;
+import java.io.IOException;
 import org.json.JSONObject;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -25,7 +27,6 @@ import java.util.Properties;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
-
 
 @RestController
 @RequestMapping("/api")
@@ -282,16 +283,17 @@ public class SignupController {
         return new JSONObject(response.body()).getString("access_token");
     }
 
-  @Configuration
-public class CorsConfig implements WebMvcConfigurer {
-    @Override
-    public void addCorsMappings(CorsRegistry registry) {
-        registry.addMapping("/**")
-                .allowedOrigins("*") // Pour le développement seulement
-                .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
-                .allowedHeaders("*");
+    @Configuration
+    public class CorsConfig implements WebMvcConfigurer {
+
+        @Override
+        public void addCorsMappings(CorsRegistry registry) {
+            registry.addMapping("/**")
+                    .allowedOrigins("*") // Pour le développement seulement
+                    .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
+                    .allowedHeaders("*");
+        }
     }
-}
 
     private void saveUserToFirestore(String uid, String email, String provider) throws Exception {
         Firestore db = FirestoreClient.getFirestore();
@@ -314,6 +316,32 @@ public class CorsConfig implements WebMvcConfigurer {
             }
 
             db.collection("users").document(uid).set(userData);
+        }
+    }
+
+    private String buildAuthUrl(String provider) {
+        String clientId = System.getenv(provider.toUpperCase() + "_CLIENT_ID");
+        if (clientId == null) {
+            throw new RuntimeException("Configuration manquante: " + provider.toUpperCase() + "_CLIENT_ID");
+        }
+
+        String redirectUri = "https://gestionprojetsswing.firebaseapp.com/__/auth/handler";
+
+        return provider.equalsIgnoreCase("github")
+                ? "https://github.com/login/oauth/authorize?client_id=" + clientId
+                + "&redirect_uri=" + redirectUri + "&scope=user:email"
+                : "https://accounts.google.com/o/oauth2/v2/auth?client_id=" + clientId
+                + "&redirect_uri=" + redirectUri + "&response_type=code&scope=email profile";
+    }
+
+    @GetMapping("/auth/{provider}")
+    public void authRedirect(@PathVariable String provider, HttpServletResponse response) throws IOException {
+        try {
+            String authUrl = buildAuthUrl(provider);
+            response.sendRedirect(authUrl);
+        } catch (Exception e) {
+            response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+                    "Erreur lors de la génération de l'URL: " + e.getMessage());
         }
     }
 }

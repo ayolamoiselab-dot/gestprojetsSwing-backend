@@ -16,7 +16,6 @@ HELP.md
 
 ### IntelliJ IDEA ###
 .idea
-.env
 *.iws
 *.iml
 *.ipr
