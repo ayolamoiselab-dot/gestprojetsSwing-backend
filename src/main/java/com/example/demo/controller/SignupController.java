@@ -5,10 +5,14 @@ import com.google.cloud.firestore.Firestore;
 import com.google.firebase.auth.*;
 import com.google.firebase.cloud.FirestoreClient;
 import com.example.demo.config.TemporaryUserStorage;
-import jakarta.servlet.http.HttpServletResponse;
 import org.json.JSONObject;
+import org.json.JSONArray;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.servlet.config.annotation.CorsRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 import javax.mail.*;
 import javax.mail.internet.InternetAddress;
@@ -21,23 +25,24 @@ import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.web.servlet.config.annotation.CorsRegistry;
-import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
-
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpSession;
 import java.io.IOException;
 import java.net.URLEncoder;
-import java.util.UUID;
 import java.nio.charset.StandardCharsets;
-import org.json.JSONArray;
 
 @RestController
 @RequestMapping("/api")
 public class SignupController {
 
     private static final String FIREBASE_API_KEY = System.getenv("FIREBASE_API_KEY");
-    // Classe interne pour gérer les credentials GitHub
+    private static final Map<String, Map<String, String>> tempSessions = new ConcurrentHashMap<>();
+
+    @Autowired
+    private HttpServletRequest request;
 
     @PostMapping("/signup")
     public ResponseEntity<String> signup(@RequestBody String requestBody) {
@@ -47,13 +52,13 @@ public class SignupController {
             String email = json.getString("email");
             String password = json.getString("password");
 
-            UserRecord.CreateRequest request = new UserRecord.CreateRequest()
+            UserRecord.CreateRequest createRequest = new UserRecord.CreateRequest()
                     .setEmail(email)
                     .setPassword(password)
                     .setDisplayName(fullName)
                     .setEmailVerified(false);
 
-            UserRecord userRecord = FirebaseAuth.getInstance().createUser(request);
+            UserRecord userRecord = FirebaseAuth.getInstance().createUser(createRequest);
             String uid = userRecord.getUid();
 
             String verificationLink = FirebaseAuth.getInstance().generateEmailVerificationLink(email) + "&uid=" + uid;
@@ -61,35 +66,31 @@ public class SignupController {
 
             sendVerificationEmail(email, verificationLink);
 
-            JSONObject responseJson = new JSONObject();
-            responseJson.put("message", "User created, please verify your email.");
-            responseJson.put("uid", uid);
-            return ResponseEntity.ok(responseJson.toString());
+            return ResponseEntity.ok(new JSONObject()
+                    .put("message", "User created, please verify your email.")
+                    .put("uid", uid).toString());
+
         } catch (FirebaseAuthException e) {
-            return ResponseEntity.status(400).body("{\"error\": \"Error creating user: " + e.getMessage() + "\"}");
+            return ResponseEntity.status(400).body("{\"error\":\"Error creating user: " + e.getMessage() + "\"}");
         } catch (Exception e) {
-            return ResponseEntity.status(500).body("{\"error\": \"Server error: " + e.getMessage() + "\"}");
+            return ResponseEntity.status(500).body("{\"error\":\"Server error: " + e.getMessage() + "\"}");
         }
     }
 
     @GetMapping("/verify-email")
     public ResponseEntity<String> verifyEmail(@RequestParam("uid") String uid, @RequestParam("oobCode") String oobCode) {
         try {
-            boolean isVerified = verifyEmailWithOobCode(oobCode);
-
-            if (!isVerified) {
-                return ResponseEntity.status(400).body("{\"error\": \"Invalid or expired verification link.\"}");
+            if (!verifyEmailWithOobCode(oobCode)) {
+                return ResponseEntity.status(400).body("{\"error\":\"Invalid or expired verification link.\"}");
             }
 
-            UserRecord.UpdateRequest updateRequest = new UserRecord.UpdateRequest(uid)
-                    .setEmailVerified(true);
-            FirebaseAuth.getInstance().updateUser(updateRequest);
-
+            FirebaseAuth.getInstance().updateUser(new UserRecord.UpdateRequest(uid).setEmailVerified(true));
             UserRecord userRecord = FirebaseAuth.getInstance().getUser(uid);
+
             if (userRecord.isEmailVerified()) {
                 TemporaryUserStorage.UserData userData = TemporaryUserStorage.get(uid);
                 if (userData == null) {
-                    return ResponseEntity.status(400).body("{\"error\": \"User data not found.\"}");
+                    return ResponseEntity.status(400).body("{\"error\":\"User data not found.\"}");
                 }
 
                 Firestore db = FirestoreClient.getFirestore();
@@ -101,14 +102,13 @@ public class SignupController {
                 db.collection("users").document(uid).set(userMap);
                 TemporaryUserStorage.remove(uid);
 
-                return ResponseEntity.ok("{\"message\": \"Email verified, user created in Firestore.\"}");
-            } else {
-                return ResponseEntity.status(400).body("{\"error\": \"Email not yet verified.\"}");
+                return ResponseEntity.ok("{\"message\":\"Email verified, user created in Firestore.\"}");
             }
+            return ResponseEntity.status(400).body("{\"error\":\"Email not yet verified.\"}");
         } catch (FirebaseAuthException e) {
-            return ResponseEntity.status(400).body("{\"error\": \"Error verifying user: " + e.getMessage() + "\"}");
+            return ResponseEntity.status(400).body("{\"error\":\"Error verifying user: " + e.getMessage() + "\"}");
         } catch (Exception e) {
-            return ResponseEntity.status(500).body("{\"error\": \"Server error: " + e.getMessage() + "\"}");
+            return ResponseEntity.status(500).body("{\"error\":\"Server error: " + e.getMessage() + "\"}");
         }
     }
 
@@ -116,32 +116,32 @@ public class SignupController {
     public ResponseEntity<String> checkVerificationStatus(@RequestParam("uid") String uid) {
         try {
             UserRecord userRecord = FirebaseAuth.getInstance().getUser(uid);
-            JSONObject responseJson = new JSONObject();
-            responseJson.put("status", userRecord.isEmailVerified() ? "verified" : "pending");
-            return ResponseEntity.ok(responseJson.toString());
+            return ResponseEntity.ok(new JSONObject()
+                    .put("status", userRecord.isEmailVerified() ? "verified" : "pending")
+                    .toString());
         } catch (FirebaseAuthException e) {
-            return ResponseEntity.status(400).body("{\"error\": \"User not found: " + e.getMessage() + "\"}");
+            return ResponseEntity.status(400).body("{\"error\":\"User not found: " + e.getMessage() + "\"}");
         }
     }
 
     @GetMapping("/user/{uid}")
     public ResponseEntity<String> getUser(@PathVariable("uid") String uid) {
         try {
-            Firestore db = FirestoreClient.getFirestore();
-            DocumentSnapshot document = db.collection("users").document(uid).get().get();
+            DocumentSnapshot document = FirestoreClient.getFirestore()
+                    .collection("users").document(uid).get().get();
+
             if (document.exists()) {
                 Map<String, Object> userData = document.getData();
-                JSONObject responseJson = new JSONObject();
-                responseJson.put("uid", uid);
-                responseJson.put("fullName", userData.get("fullName"));
-                responseJson.put("email", userData.get("email"));
-                responseJson.put("createdAt", userData.get("createdAt"));
-                return ResponseEntity.ok(responseJson.toString());
-            } else {
-                return ResponseEntity.status(404).body("{\"error\": \"User not found.\"}");
+                return ResponseEntity.ok(new JSONObject()
+                        .put("uid", uid)
+                        .put("fullName", userData.get("fullName"))
+                        .put("email", userData.get("email"))
+                        .put("createdAt", userData.get("createdAt"))
+                        .toString());
             }
+            return ResponseEntity.status(404).body("{\"error\":\"User not found.\"}");
         } catch (Exception e) {
-            return ResponseEntity.status(500).body("{\"error\": \"Server error: " + e.getMessage() + "\"}");
+            return ResponseEntity.status(500).body("{\"error\":\"Server error: " + e.getMessage() + "\"}");
         }
     }
 
@@ -154,31 +154,28 @@ public class SignupController {
 
             HttpClient client = HttpClient.newHttpClient();
             String signInUrl = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=" + FIREBASE_API_KEY;
-            JSONObject signInPayload = new JSONObject();
-            signInPayload.put("email", email);
-            signInPayload.put("password", password);
-            signInPayload.put("returnSecureToken", true);
 
-            HttpRequest signInRequest = HttpRequest.newBuilder()
-                    .uri(URI.create(signInUrl))
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(signInPayload.toString()))
-                    .build();
-            HttpResponse<String> signInResponse = client.send(signInRequest, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = client.send(
+                    HttpRequest.newBuilder()
+                            .uri(URI.create(signInUrl))
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(new JSONObject()
+                                    .put("email", email)
+                                    .put("password", password)
+                                    .put("returnSecureToken", true).toString()))
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString());
 
-            if (signInResponse.statusCode() != 200) {
-                return ResponseEntity.status(401).body("{\"error\": \"Invalid email or password.\"}");
+            if (response.statusCode() != 200) {
+                return ResponseEntity.status(401).body("{\"error\":\"Invalid email or password.\"}");
             }
 
-            JSONObject signInJson = new JSONObject(signInResponse.body());
-            String uid = signInJson.getString("localId");
-
-            JSONObject responseJson = new JSONObject();
-            responseJson.put("message", "Login successful.");
-            responseJson.put("uid", uid);
-            return ResponseEntity.ok(responseJson.toString());
+            String uid = new JSONObject(response.body()).getString("localId");
+            return ResponseEntity.ok(new JSONObject()
+                    .put("message", "Login successful.")
+                    .put("uid", uid).toString());
         } catch (Exception e) {
-            return ResponseEntity.status(500).body("{\"error\": \"Server error: " + e.getMessage() + "\"}");
+            return ResponseEntity.status(500).body("{\"error\":\"Server error: " + e.getMessage() + "\"}");
         }
     }
 
@@ -194,14 +191,13 @@ public class SignupController {
 
             saveUserToFirestore(uid, decodedToken.getEmail(), provider);
 
-            JSONObject response = new JSONObject();
-            response.put("uid", uid);
-            response.put("email", decodedToken.getEmail());
-            response.put("fullName", decodedToken.getName());
-
-            return ResponseEntity.ok(response.toString());
+            return ResponseEntity.ok(new JSONObject()
+                    .put("uid", uid)
+                    .put("email", decodedToken.getEmail())
+                    .put("fullName", decodedToken.getName())
+                    .toString());
         } catch (Exception e) {
-            return ResponseEntity.status(500).body("{\"error\": \"Erreur d'authentification: " + e.getMessage() + "\"}");
+            return ResponseEntity.status(500).body("{\"error\":\"Authentication error: " + e.getMessage() + "\"}");
         }
     }
 
@@ -212,65 +208,25 @@ public class SignupController {
             HttpServletResponse response) throws IOException {
 
         try {
-            // Décoder l'état
-            String decodedState = new String(Base64.getDecoder().decode(state));
-            JSONObject stateJson = new JSONObject(decodedState);
+            JSONObject stateJson = new JSONObject(new String(Base64.getDecoder().decode(state)));
             String provider = stateJson.getString("provider");
-
-            // Échanger le code contre un token
             String accessToken = exchangeCodeForToken(provider, code);
-
-            // Obtenir l'email de l'utilisateur
             String email = getEmailFromProvider(provider, accessToken);
             String uid = email.replaceAll("[^a-zA-Z0-9]", "_");
 
-            // Créer ou mettre à jour l'utilisateur dans Firebase Auth
-            UserRecord userRecord;
-            try {
-                userRecord = FirebaseAuth.getInstance().getUserByEmail(email);
-            } catch (FirebaseAuthException e) {
-                UserRecord.CreateRequest request = new UserRecord.CreateRequest()
-                        .setUid(uid)
-                        .setEmail(email)
-                        .setEmailVerified(true);
+            UserRecord userRecord = createOrUpdateUser(provider, email, accessToken);
+            String sessionId = UUID.randomUUID().toString();
 
-                if (provider.equalsIgnoreCase("google")) {
-                    String name = getGoogleUserName(accessToken);
-                    request.setDisplayName(name);
-                }
+            Map<String, String> userInfo = new HashMap<>();
+            userInfo.put("uid", userRecord.getUid());
+            userInfo.put("email", email);
+            userInfo.put("fullName", userRecord.getDisplayName());
+            tempSessions.put(sessionId, userInfo);
 
-                userRecord = FirebaseAuth.getInstance().createUser(request);
-            }
-
-            // Créer un token Firebase personnalisé
-            String customToken = FirebaseAuth.getInstance().createCustomToken(userRecord.getUid());
-
-            // Sauvegarder dans Firestore
-            saveUserToFirestore(userRecord.getUid(), email, provider);
-
-            // Créer un cookie de session
-            jakarta.servlet.http.Cookie authCookie = new jakarta.servlet.http.Cookie("authToken", customToken);
-            authCookie.setHttpOnly(true);
-            authCookie.setSecure(true);
-            authCookie.setPath("/");
-            authCookie.setMaxAge(60 * 60 * 24);
-            response.addCookie(authCookie);
-
-            // Redirection vers le frontend
-            String redirectUrl = String.format(
-                    "https://gestprojetsswing-backend.onrender.com/api/auth/complete?token=%s&uid=%s",
-                    URLEncoder.encode(customToken, "UTF-8"),
-                    URLEncoder.encode(userRecord.getUid(), "UTF-8")
-            );
-            response.sendRedirect(redirectUrl);
-
+            response.sendRedirect("gestionprojetsswing://auth-success?session=" + sessionId);
         } catch (Exception e) {
-            e.printStackTrace();
-            String errorRedirect = String.format(
-                    "https://gestprojetsswing-backend.onrender.com/api/auth/complete?error=%s",
-                    URLEncoder.encode("Authentication failed: " + e.getMessage(), "UTF-8")
-            );
-            response.sendRedirect(errorRedirect);
+            response.sendRedirect("gestionprojetsswing://auth-error?message="
+                    + URLEncoder.encode(e.getMessage(), "UTF-8"));
         }
     }
 
@@ -281,25 +237,23 @@ public class SignupController {
             @RequestParam(value = "error", required = false) String error) {
 
         if (error != null) {
-            return ResponseEntity.status(400).body("{\"error\": \"" + error + "\"}");
+            return ResponseEntity.status(400).body("{\"error\":\"" + error + "\"}");
         }
-
-        JSONObject response = new JSONObject();
-        response.put("status", "success");
-        response.put("token", token);
-        response.put("uid", uid);
-        return ResponseEntity.ok(response.toString());
+        return ResponseEntity.ok(new JSONObject()
+                .put("status", "success")
+                .put("token", token)
+                .put("uid", uid)
+                .toString());
     }
 
     @GetMapping("/auth/{provider}")
     public void authRedirect(@PathVariable String provider, HttpServletResponse response) throws IOException {
         try {
             String state = generateStateToken();
-            String authUrl = buildAuthUrl(provider, state);
-            response.sendRedirect(authUrl);
+            response.sendRedirect(buildAuthUrl(provider, state));
         } catch (Exception e) {
             response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-                    "Erreur lors de la génération de l'URL: " + e.getMessage());
+                    "Error generating auth URL: " + e.getMessage());
         }
     }
 
@@ -307,71 +261,67 @@ public class SignupController {
     public ResponseEntity<String> checkAuthStatus(HttpServletRequest request) {
         try {
             String idToken = extractToken(request);
-
-            if (idToken != null) {
-                FirebaseToken decodedToken = FirebaseAuth.getInstance().verifyIdToken(idToken);
-                String uid = decodedToken.getUid();
-
-                Firestore db = FirestoreClient.getFirestore();
-                DocumentSnapshot userDoc = db.collection("users").document(uid).get().get();
-
-                JSONObject response = new JSONObject();
-                response.put("isAuthenticated", true);
-                response.put("uid", uid);
-
-                if (userDoc.exists()) {
-                    Map<String, Object> userData = userDoc.getData();
-                    response.put("fullName", userData.getOrDefault("fullName", "User"));
-                } else {
-                    response.put("fullName", "User");
-                }
-
-                return ResponseEntity.ok(response.toString());
+            if (idToken == null) {
+                return ResponseEntity.ok("{\"isAuthenticated\":false}");
             }
 
-            return ResponseEntity.ok("{\"isAuthenticated\": false}");
+            FirebaseToken decodedToken = FirebaseAuth.getInstance().verifyIdToken(idToken);
+            String uid = decodedToken.getUid();
+            DocumentSnapshot userDoc = FirestoreClient.getFirestore()
+                    .collection("users").document(uid).get().get();
+
+            JSONObject response = new JSONObject()
+                    .put("isAuthenticated", true)
+                    .put("uid", uid);
+
+            // Vérifier si le document existe et récupérer "fullName" avec une valeur par défaut
+            String fullName = userDoc.exists() ? userDoc.getString("fullName") : "User";
+            if (fullName == null) {
+                fullName = "User"; // Valeur par défaut si fullName est null
+            }
+
+            response.put("fullName", fullName);
+
+            return ResponseEntity.ok(response.toString());
         } catch (Exception e) {
-            return ResponseEntity.ok("{\"isAuthenticated\": false}");
+            return ResponseEntity.ok("{\"isAuthenticated\":false}");
         }
     }
 
-    // Méthodes utilitaires privées
+    public static Map<String, String> getSessionInfo(String sessionId) {
+        return tempSessions.remove(sessionId);
+    }
+
     private boolean verifyEmailWithOobCode(String oobCode) throws Exception {
         HttpClient client = HttpClient.newHttpClient();
-        String url = "https://identitytoolkit.googleapis.com/v1/accounts:update?key=" + FIREBASE_API_KEY;
-        JSONObject payload = new JSONObject();
-        payload.put("oobCode", oobCode);
+        HttpResponse<String> response = client.send(
+                HttpRequest.newBuilder()
+                        .uri(URI.create("https://identitytoolkit.googleapis.com/v1/accounts:update?key=" + FIREBASE_API_KEY))
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(new JSONObject().put("oobCode", oobCode).toString()))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
-                .build();
-
-        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
         return response.statusCode() == 200;
     }
 
     private void sendVerificationEmail(String toEmail, String verificationLink) throws MessagingException {
-        String host = "smtp.gmail.com";
-        String from = "moiseayola6@gmail.com";
-        String password = System.getenv("GMAIL_PASSWORD");
+        Properties props = new Properties();
+        props.put("mail.smtp.host", "smtp.gmail.com");
+        props.put("mail.smtp.port", "587");
+        props.put("mail.smtp.auth", "true");
+        props.put("mail.smtp.starttls.enable", "true");
 
-        Properties properties = new Properties();
-        properties.put("mail.smtp.host", host);
-        properties.put("mail.smtp.port", "587");
-        properties.put("mail.smtp.auth", "true");
-        properties.put("mail.smtp.starttls.enable", "true");
-
-        Session session = Session.getInstance(properties, new Authenticator() {
-            @Override
+        Session session = Session.getInstance(props, new Authenticator() {
             protected PasswordAuthentication getPasswordAuthentication() {
-                return new PasswordAuthentication(from, password);
+                return new PasswordAuthentication(
+                        System.getenv("GMAIL_USER"),
+                        System.getenv("GMAIL_PASSWORD"));
             }
         });
 
         MimeMessage message = new MimeMessage(session);
-        message.setFrom(new InternetAddress(from));
+        message.setFrom(new InternetAddress(System.getenv("GMAIL_USER")));
         message.addRecipient(Message.RecipientType.TO, new InternetAddress(toEmail));
         message.setSubject("Verify Your Email");
         message.setText("Please click the following link to verify your email: " + verificationLink);
@@ -381,47 +331,37 @@ public class SignupController {
 
     private String exchangeCodeForToken(String provider, String code) throws Exception {
         HttpClient client = HttpClient.newHttpClient();
-        String tokenUrl = provider.equalsIgnoreCase("github")
+        String tokenUrl = provider.equals("github")
                 ? "https://github.com/login/oauth/access_token"
                 : "https://oauth2.googleapis.com/token";
 
-        // Construire le corps de la requête différemment selon le provider
-        String requestBody;
-        if (provider.equalsIgnoreCase("github")) {
-            requestBody = String.format(
-                    "client_id=%s&client_secret=%s&code=%s&redirect_uri=%s",
-                    System.getenv(provider.toUpperCase() + "_CLIENT_ID"),
-                    System.getenv(provider.toUpperCase() + "_CLIENT_SECRET"),
-                    code,
-                    URLEncoder.encode("https://gestprojetsswing-backend.onrender.com/api/auth/callback", "UTF-8")
-            );
-        } else { // Google
-            requestBody = String.format(
-                    "client_id=%s&client_secret=%s&code=%s&redirect_uri=%s&grant_type=authorization_code",
-                    System.getenv(provider.toUpperCase() + "_CLIENT_ID"),
-                    System.getenv(provider.toUpperCase() + "_CLIENT_SECRET"),
-                    code,
-                    URLEncoder.encode("https://gestprojetsswing-backend.onrender.com/api/auth/callback", "UTF-8")
-            );
-        }
+        String requestBody = provider.equals("github")
+                ? String.format(
+                        "client_id=%s&client_secret=%s&code=%s&redirect_uri=%s",
+                        System.getenv("GITHUB_CLIENT_ID"),
+                        System.getenv("GITHUB_CLIENT_SECRET"),
+                        code,
+                        URLEncoder.encode("https://gestprojetsswing-backend.onrender.com/api/auth/callback", "UTF-8"))
+                : String.format(
+                        "client_id=%s&client_secret=%s&code=%s&redirect_uri=%s&grant_type=authorization_code",
+                        System.getenv("GOOGLE_CLIENT_ID"),
+                        System.getenv("GOOGLE_CLIENT_SECRET"),
+                        code,
+                        URLEncoder.encode("https://gestprojetsswing-backend.onrender.com/api/auth/callback", "UTF-8"));
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(tokenUrl))
-                .header("Accept", "application/json")
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-                .build();
+        HttpResponse<String> response = client.send(
+                HttpRequest.newBuilder()
+                        .uri(URI.create(tokenUrl))
+                        .header("Accept", "application/json")
+                        .header("Content-Type", "application/x-www-form-urlencoded")
+                        .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
 
-        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
         JSONObject responseBody = new JSONObject(response.body());
-
-        // Debug: log the full response
-        System.out.println("Token exchange response: " + responseBody.toString());
-
         if (!responseBody.has("access_token")) {
-            throw new RuntimeException("Failed to get access token. Response: " + responseBody);
+            throw new RuntimeException("Failed to get access token: " + responseBody);
         }
-
         return responseBody.getString("access_token");
     }
 
@@ -429,26 +369,19 @@ public class SignupController {
         String clientId = System.getenv(provider.toUpperCase() + "_CLIENT_ID");
         String redirectUri = "https://gestprojetsswing-backend.onrender.com/api/auth/callback";
 
-        Map<String, String> stateData = new HashMap<>();
-        stateData.put("provider", provider);
-        stateData.put("firebaseType", "signIn");
-        stateData.put("stateToken", state);
+        String encodedState = Base64.getEncoder().encodeToString(new JSONObject()
+                .put("provider", provider)
+                .put("firebaseType", "signIn")
+                .put("stateToken", state)
+                .toString().getBytes());
 
-        String encodedState = Base64.getEncoder().encodeToString(
-                new JSONObject(stateData).toString().getBytes()
-        );
-
-        return provider.equalsIgnoreCase("github")
-                ? "https://github.com/login/oauth/authorize?client_id=" + clientId
-                + "&redirect_uri=" + redirectUri
-                + "&scope=user:email"
-                + // Modifié pour inclure user:email
-                "&state=" + encodedState
-                : "https://accounts.google.com/o/oauth2/v2/auth?client_id=" + clientId
-                + "&redirect_uri=" + redirectUri
-                + "&response_type=code"
-                + "&scope=email profile"
-                + "&state=" + encodedState;
+        return provider.equals("github")
+                ? String.format(
+                        "https://github.com/login/oauth/authorize?client_id=%s&redirect_uri=%s&scope=user:email&state=%s",
+                        clientId, redirectUri, encodedState)
+                : String.format(
+                        "https://accounts.google.com/o/oauth2/v2/auth?client_id=%s&redirect_uri=%s&response_type=code&scope=email profile&state=%s",
+                        clientId, redirectUri, encodedState);
     }
 
     private void saveUserToFirestore(String uid, String email, String provider) throws Exception {
@@ -462,64 +395,59 @@ public class SignupController {
             userData.put("provider", provider);
             userData.put("lastLogin", System.currentTimeMillis());
 
-            // Pour Google, on peut aussi stocker le nom
-            if (provider.equalsIgnoreCase("google")) {
-                try {
-                    UserRecord userRecord = FirebaseAuth.getInstance().getUser(uid);
-                    if (userRecord.getDisplayName() != null) {
-                        userData.put("fullName", userRecord.getDisplayName());
-                    }
-                } catch (FirebaseAuthException e) {
-                    System.out.println("Could not get display name: " + e.getMessage());
+            try {
+                UserRecord userRecord = FirebaseAuth.getInstance().getUser(uid);
+                if (userRecord.getDisplayName() != null) {
+                    userData.put("fullName", userRecord.getDisplayName());
                 }
+            } catch (FirebaseAuthException e) {
+                System.err.println("Could not get display name: " + e.getMessage());
             }
 
             db.collection("users").document(uid).set(userData);
         } else {
-            // Mettre à jour le dernier login
-            Map<String, Object> updates = new HashMap<>();
-            updates.put("lastLogin", System.currentTimeMillis());
-            db.collection("users").document(uid).update(updates);
+            db.collection("users").document(uid).update("lastLogin", System.currentTimeMillis());
         }
     }
 
-    private String createFirebaseUser(String provider, String accessToken) throws FirebaseAuthException, IOException, InterruptedException {
-        String email = getEmailFromProvider(provider, accessToken);
+    private UserRecord createOrUpdateUser(String provider, String email, String accessToken)
+            throws FirebaseAuthException, IOException, InterruptedException {
         String uid = email.replaceAll("[^a-zA-Z0-9]", "_");
 
         try {
-            UserRecord userRecord = FirebaseAuth.getInstance().getUserByEmail(email);
-            return userRecord.getUid();
+            return FirebaseAuth.getInstance().getUserByEmail(email);
         } catch (FirebaseAuthException e) {
             UserRecord.CreateRequest request = new UserRecord.CreateRequest()
                     .setUid(uid)
                     .setEmail(email)
                     .setEmailVerified(true);
 
-            if (provider.equalsIgnoreCase("google")) {
+            if (provider.equals("google")) {
                 request.setDisplayName(getGoogleUserName(accessToken));
+            } else if (provider.equals("github")) {
+                String name = getGitHubUserName(accessToken);
+                if (name != null && !name.isEmpty()) {
+                    request.setDisplayName(name);
+                }
             }
-
-            UserRecord userRecord = FirebaseAuth.getInstance().createUser(request);
-            return userRecord.getUid();
+            return FirebaseAuth.getInstance().createUser(request);
         }
     }
 
     private String getEmailFromProvider(String provider, String accessToken) throws IOException, InterruptedException {
         HttpClient client = HttpClient.newHttpClient();
-        if (provider.equalsIgnoreCase("github")) {
-            // Première requête pour obtenir l'email principal
-            HttpRequest emailRequest = HttpRequest.newBuilder()
-                    .uri(URI.create("https://api.github.com/user/emails"))
-                    .header("Authorization", "Bearer " + accessToken)
-                    .header("Accept", "application/vnd.github+json")
-                    .GET()
-                    .build();
 
-            HttpResponse<String> emailResponse = client.send(emailRequest, HttpResponse.BodyHandlers.ofString());
+        if (provider.equals("github")) {
+            HttpResponse<String> emailResponse = client.send(
+                    HttpRequest.newBuilder()
+                            .uri(URI.create("https://api.github.com/user/emails"))
+                            .header("Authorization", "Bearer " + accessToken)
+                            .header("Accept", "application/vnd.github+json")
+                            .GET()
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString());
+
             JSONArray emails = new JSONArray(emailResponse.body());
-
-            // Trouver l'email principal
             for (int i = 0; i < emails.length(); i++) {
                 JSONObject emailObj = emails.getJSONObject(i);
                 if (emailObj.getBoolean("primary")) {
@@ -528,31 +456,41 @@ public class SignupController {
             }
             throw new RuntimeException("No primary email found for GitHub user");
         } else {
-            // Code existant pour Google
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create("https://www.googleapis.com/oauth2/v3/userinfo"))
-                    .header("Authorization", "Bearer " + accessToken)
-                    .GET()
-                    .build();
+            HttpResponse<String> response = client.send(
+                    HttpRequest.newBuilder()
+                            .uri(URI.create("https://www.googleapis.com/oauth2/v3/userinfo"))
+                            .header("Authorization", "Bearer " + accessToken)
+                            .GET()
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString());
 
-            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-            JSONObject userInfo = new JSONObject(response.body());
-            return userInfo.getString("email");
+            return new JSONObject(response.body()).getString("email");
         }
     }
 
     private String getGoogleUserName(String accessToken) throws IOException, InterruptedException {
-        HttpClient client = HttpClient.newHttpClient();
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create("https://www.googleapis.com/oauth2/v3/userinfo"))
-                .header("Authorization", "Bearer " + accessToken)
-                .GET()
-                .build();
+        HttpResponse<String> response = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder()
+                        .uri(URI.create("https://www.googleapis.com/oauth2/v3/userinfo"))
+                        .header("Authorization", "Bearer " + accessToken)
+                        .GET()
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
 
-        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        JSONObject userInfo = new JSONObject(response.body());
+        return new JSONObject(response.body()).optString("name", "User");
+    }
 
-        return userInfo.optString("name", "User");
+    private String getGitHubUserName(String accessToken) throws IOException, InterruptedException {
+        HttpResponse<String> response = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder()
+                        .uri(URI.create("https://api.github.com/user"))
+                        .header("Authorization", "Bearer " + accessToken)
+                        .header("Accept", "application/vnd.github+json")
+                        .GET()
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        return new JSONObject(response.body()).optString("name", "");
     }
 
     private String generateStateToken() {
@@ -573,12 +511,11 @@ public class SignupController {
                 }
             }
         }
-
         return null;
     }
 
     @Configuration
-    public class CorsConfig implements WebMvcConfigurer {
+    public static class CorsConfig implements WebMvcConfigurer {
 
         @Override
         public void addCorsMappings(CorsRegistry registry) {
