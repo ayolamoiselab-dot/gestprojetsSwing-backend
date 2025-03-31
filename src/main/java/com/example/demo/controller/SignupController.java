@@ -4,6 +4,8 @@ import com.google.cloud.firestore.DocumentSnapshot;
 import com.google.cloud.firestore.Firestore;
 import com.google.firebase.auth.*;
 import com.google.firebase.cloud.FirestoreClient;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import org.json.JSONObject;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -84,49 +86,48 @@ public class SignupController {
     }
 
     // Endpoint pour gérer le callback de Firebase
-    @GetMapping("/auth/callback")
-    public ResponseEntity<Void> handleAuthCallback(
-            @RequestParam(value = "token", required = false) String idToken,
-            @RequestParam(value = "error", required = false) String error) {
-        try {
-            if (error != null) {
-                // Gérer les erreurs d'authentification
-                return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                        .body(null);
-            }
-
-            if (idToken == null) {
-                return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                        .body(null);
-            }
-
-            // Vérifier le token avec Firebase
-            FirebaseToken decodedToken = FirebaseAuth.getInstance().verifyIdToken(idToken);
-            String uid = decodedToken.getUid();
-            String fullName = decodedToken.getName() != null ? decodedToken.getName() : "Utilisateur";
-
-            // Stocker les informations de l'utilisateur dans Firestore (optionnel)
-            Firestore db = FirestoreClient.getFirestore();
-            Map<String, Object> userData = new HashMap<>();
-            userData.put("uid", uid);
-            userData.put("fullName", fullName);
-            userData.put("email", decodedToken.getEmail());
-            userData.put("createdAt", System.currentTimeMillis());
-            db.collection("users").document(uid).set(userData);
-
-            // Rediriger vers le serveur local (NanoHTTPD) sur l'application Swing
-            String redirectUrl = String.format(
-                "http://localhost:8080/auth-success?uid=%s&fullName=%s",
-                uid, fullName
-            );
-            return ResponseEntity.status(HttpStatus.FOUND)
-                    .header("Location", redirectUrl)
-                    .build();
-        } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(null);
+@GetMapping("/auth/callback")
+public ResponseEntity<Void> handleAuthCallback(
+        @RequestParam(value = "token", required = false) String idToken,
+        @RequestParam(value = "error", required = false) String error,
+        @RequestParam(value = "state", required = false) String state) {
+    try {
+        if (error != null) {
+            // Gérer les erreurs d'authentification
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(null);
         }
+
+        if (idToken == null) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(null);
+        }
+
+        // Vérifier le token avec Firebase
+        FirebaseToken decodedToken = FirebaseAuth.getInstance().verifyIdToken(idToken);
+        String uid = decodedToken.getUid();
+        String fullName = decodedToken.getName() != null ? decodedToken.getName() : "Utilisateur";
+
+        // Stocker les informations de l'utilisateur dans Firestore (optionnel)
+        Firestore db = FirestoreClient.getFirestore();
+        Map<String, Object> userData = new HashMap<>();
+        userData.put("uid", uid);
+        userData.put("fullName", fullName);
+        userData.put("email", decodedToken.getEmail());
+        userData.put("createdAt", System.currentTimeMillis());
+        db.collection("users").document(uid).set(userData);
+
+        // Rediriger vers le serveur local (NanoHTTPD) sur l'application Swing
+        String redirectUrl = String.format(
+            "http://localhost:8080/auth-success?uid=%s&fullName=%s",
+            URLEncoder.encode(uid, StandardCharsets.UTF_8),
+            URLEncoder.encode(fullName, StandardCharsets.UTF_8)
+        );
+        return ResponseEntity.status(HttpStatus.FOUND)
+                .header("Location", redirectUrl)
+                .build();
+    } catch (Exception e) {
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(null);
     }
+}
 
     private void sendVerificationEmail(String toEmail, String verificationLink) throws MessagingException {
         Properties props = new Properties();
