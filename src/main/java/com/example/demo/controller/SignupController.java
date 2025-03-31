@@ -212,14 +212,43 @@ public class SignupController {
             HttpServletResponse response) throws IOException {
 
         try {
+            // Décoder l'état
             String decodedState = new String(Base64.getDecoder().decode(state));
             JSONObject stateJson = new JSONObject(decodedState);
             String provider = stateJson.getString("provider");
 
+            // Échanger le code contre un token
             String accessToken = exchangeCodeForToken(provider, code);
-            String uid = createFirebaseUser(provider, accessToken);
-            String customToken = FirebaseAuth.getInstance().createCustomToken(uid);
 
+            // Obtenir l'email de l'utilisateur
+            String email = getEmailFromProvider(provider, accessToken);
+            String uid = email.replaceAll("[^a-zA-Z0-9]", "_");
+
+            // Créer ou mettre à jour l'utilisateur dans Firebase Auth
+            UserRecord userRecord;
+            try {
+                userRecord = FirebaseAuth.getInstance().getUserByEmail(email);
+            } catch (FirebaseAuthException e) {
+                UserRecord.CreateRequest request = new UserRecord.CreateRequest()
+                        .setUid(uid)
+                        .setEmail(email)
+                        .setEmailVerified(true);
+
+                if (provider.equalsIgnoreCase("google")) {
+                    String name = getGoogleUserName(accessToken);
+                    request.setDisplayName(name);
+                }
+
+                userRecord = FirebaseAuth.getInstance().createUser(request);
+            }
+
+            // Créer un token Firebase personnalisé
+            String customToken = FirebaseAuth.getInstance().createCustomToken(userRecord.getUid());
+
+            // Sauvegarder dans Firestore
+            saveUserToFirestore(userRecord.getUid(), email, provider);
+
+            // Créer un cookie de session
             jakarta.servlet.http.Cookie authCookie = new jakarta.servlet.http.Cookie("authToken", customToken);
             authCookie.setHttpOnly(true);
             authCookie.setSecure(true);
@@ -227,16 +256,19 @@ public class SignupController {
             authCookie.setMaxAge(60 * 60 * 24);
             response.addCookie(authCookie);
 
+            // Redirection vers le frontend
             String redirectUrl = String.format(
                     "https://gestprojetsswing-backend.onrender.com/api/auth/complete?token=%s&uid=%s",
                     URLEncoder.encode(customToken, "UTF-8"),
-                    URLEncoder.encode(uid, "UTF-8")
+                    URLEncoder.encode(userRecord.getUid(), "UTF-8")
             );
             response.sendRedirect(redirectUrl);
+
         } catch (Exception e) {
+            e.printStackTrace();
             String errorRedirect = String.format(
                     "https://gestprojetsswing-backend.onrender.com/api/auth/complete?error=%s",
-                    URLEncoder.encode(e.getMessage(), "UTF-8")
+                    URLEncoder.encode("Authentication failed: " + e.getMessage(), "UTF-8")
             );
             response.sendRedirect(errorRedirect);
         }
@@ -349,23 +381,48 @@ public class SignupController {
 
     private String exchangeCodeForToken(String provider, String code) throws Exception {
         HttpClient client = HttpClient.newHttpClient();
-        String tokenUrl = provider.equals("github")
+        String tokenUrl = provider.equalsIgnoreCase("github")
                 ? "https://github.com/login/oauth/access_token"
                 : "https://oauth2.googleapis.com/token";
+
+        // Construire le corps de la requête différemment selon le provider
+        String requestBody;
+        if (provider.equalsIgnoreCase("github")) {
+            requestBody = String.format(
+                    "client_id=%s&client_secret=%s&code=%s&redirect_uri=%s",
+                    System.getenv(provider.toUpperCase() + "_CLIENT_ID"),
+                    System.getenv(provider.toUpperCase() + "_CLIENT_SECRET"),
+                    code,
+                    URLEncoder.encode("https://gestprojetsswing-backend.onrender.com/api/auth/callback", "UTF-8")
+            );
+        } else { // Google
+            requestBody = String.format(
+                    "client_id=%s&client_secret=%s&code=%s&redirect_uri=%s&grant_type=authorization_code",
+                    System.getenv(provider.toUpperCase() + "_CLIENT_ID"),
+                    System.getenv(provider.toUpperCase() + "_CLIENT_SECRET"),
+                    code,
+                    URLEncoder.encode("https://gestprojetsswing-backend.onrender.com/api/auth/callback", "UTF-8")
+            );
+        }
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(tokenUrl))
                 .header("Accept", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(
-                        "client_id=" + System.getenv(provider.toUpperCase() + "_CLIENT_ID")
-                        + "&client_secret=" + System.getenv(provider.toUpperCase() + "_CLIENT_SECRET")
-                        + "&code=" + code
-                        + "&redirect_uri=https://gestprojetsswing-backend.onrender.com"
-                ))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                 .build();
 
         HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        return new JSONObject(response.body()).getString("access_token");
+        JSONObject responseBody = new JSONObject(response.body());
+
+        // Debug: log the full response
+        System.out.println("Token exchange response: " + responseBody.toString());
+
+        if (!responseBody.has("access_token")) {
+            throw new RuntimeException("Failed to get access token. Response: " + responseBody);
+        }
+
+        return responseBody.getString("access_token");
     }
 
     private String buildAuthUrl(String provider, String state) {
@@ -403,17 +460,26 @@ public class SignupController {
             userData.put("email", email);
             userData.put("createdAt", System.currentTimeMillis());
             userData.put("provider", provider);
+            userData.put("lastLogin", System.currentTimeMillis());
 
-            try {
-                UserRecord userRecord = FirebaseAuth.getInstance().getUser(uid);
-                if (userRecord.getDisplayName() != null) {
-                    userData.put("fullName", userRecord.getDisplayName());
+            // Pour Google, on peut aussi stocker le nom
+            if (provider.equalsIgnoreCase("google")) {
+                try {
+                    UserRecord userRecord = FirebaseAuth.getInstance().getUser(uid);
+                    if (userRecord.getDisplayName() != null) {
+                        userData.put("fullName", userRecord.getDisplayName());
+                    }
+                } catch (FirebaseAuthException e) {
+                    System.out.println("Could not get display name: " + e.getMessage());
                 }
-            } catch (FirebaseAuthException e) {
-                System.out.println("Could not get display name: " + e.getMessage());
             }
 
             db.collection("users").document(uid).set(userData);
+        } else {
+            // Mettre à jour le dernier login
+            Map<String, Object> updates = new HashMap<>();
+            updates.put("lastLogin", System.currentTimeMillis());
+            db.collection("users").document(uid).update(updates);
         }
     }
 
