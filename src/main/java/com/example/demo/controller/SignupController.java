@@ -30,6 +30,7 @@ import java.io.IOException;
 import java.net.URLEncoder;
 import java.util.UUID;
 import java.nio.charset.StandardCharsets;
+import org.json.JSONArray;
 
 @RestController
 @RequestMapping("/api")
@@ -37,7 +38,6 @@ public class SignupController {
 
     private static final String FIREBASE_API_KEY = System.getenv("FIREBASE_API_KEY");
     // Classe interne pour gérer les credentials GitHub
-
 
     @PostMapping("/signup")
     public ResponseEntity<String> signup(@RequestBody String requestBody) {
@@ -228,15 +228,15 @@ public class SignupController {
             response.addCookie(authCookie);
 
             String redirectUrl = String.format(
-                "https://gestprojetsswing-backend.onrender.com/api/auth/complete?token=%s&uid=%s",
-                URLEncoder.encode(customToken, "UTF-8"),
-                URLEncoder.encode(uid, "UTF-8")
+                    "https://gestprojetsswing-backend.onrender.com/api/auth/complete?token=%s&uid=%s",
+                    URLEncoder.encode(customToken, "UTF-8"),
+                    URLEncoder.encode(uid, "UTF-8")
             );
             response.sendRedirect(redirectUrl);
         } catch (Exception e) {
             String errorRedirect = String.format(
-                "https://gestprojetsswing-backend.onrender.com/api/auth/complete?error=%s",
-                URLEncoder.encode(e.getMessage(), "UTF-8")
+                    "https://gestprojetsswing-backend.onrender.com/api/auth/complete?error=%s",
+                    URLEncoder.encode(e.getMessage(), "UTF-8")
             );
             response.sendRedirect(errorRedirect);
         }
@@ -244,14 +244,14 @@ public class SignupController {
 
     @GetMapping("/auth/complete")
     public ResponseEntity<String> authComplete(
-        @RequestParam(value = "token", required = false) String token,
-        @RequestParam(value = "uid", required = false) String uid,
-        @RequestParam(value = "error", required = false) String error) {
-        
+            @RequestParam(value = "token", required = false) String token,
+            @RequestParam(value = "uid", required = false) String uid,
+            @RequestParam(value = "error", required = false) String error) {
+
         if (error != null) {
             return ResponseEntity.status(400).body("{\"error\": \"" + error + "\"}");
         }
-        
+
         JSONObject response = new JSONObject();
         response.put("status", "success");
         response.put("token", token);
@@ -357,10 +357,10 @@ public class SignupController {
                 .uri(URI.create(tokenUrl))
                 .header("Accept", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(
-                        "client_id=" + System.getenv(provider.toUpperCase() + "_CLIENT_ID") +
-                        "&client_secret=" + System.getenv(provider.toUpperCase() + "_CLIENT_SECRET") +
-                        "&code=" + code +
-                        "&redirect_uri=https://gestprojetsswing-backend.onrender.com"
+                        "client_id=" + System.getenv(provider.toUpperCase() + "_CLIENT_ID")
+                        + "&client_secret=" + System.getenv(provider.toUpperCase() + "_CLIENT_SECRET")
+                        + "&code=" + code
+                        + "&redirect_uri=https://gestprojetsswing-backend.onrender.com"
                 ))
                 .build();
 
@@ -382,15 +382,16 @@ public class SignupController {
         );
 
         return provider.equalsIgnoreCase("github")
-                ? "https://github.com/login/oauth/authorize?client_id=" + clientId +
-                  "&redirect_uri=" + redirectUri +
-                  "&scope=user:email" +
-                  "&state=" + encodedState
-                : "https://accounts.google.com/o/oauth2/v2/auth?client_id=" + clientId +
-                  "&redirect_uri=" + redirectUri +
-                  "&response_type=code" +
-                  "&scope=email profile" +
-                  "&state=" + encodedState;
+                ? "https://github.com/login/oauth/authorize?client_id=" + clientId
+                + "&redirect_uri=" + redirectUri
+                + "&scope=user:email"
+                + // Modifié pour inclure user:email
+                "&state=" + encodedState
+                : "https://accounts.google.com/o/oauth2/v2/auth?client_id=" + clientId
+                + "&redirect_uri=" + redirectUri
+                + "&response_type=code"
+                + "&scope=email profile"
+                + "&state=" + encodedState;
     }
 
     private void saveUserToFirestore(String uid, String email, String provider) throws Exception {
@@ -440,20 +441,38 @@ public class SignupController {
 
     private String getEmailFromProvider(String provider, String accessToken) throws IOException, InterruptedException {
         HttpClient client = HttpClient.newHttpClient();
-        String userInfoUrl = provider.equalsIgnoreCase("github")
-                ? "https://api.github.com/user"
-                : "https://www.googleapis.com/oauth2/v3/userinfo";
+        if (provider.equalsIgnoreCase("github")) {
+            // Première requête pour obtenir l'email principal
+            HttpRequest emailRequest = HttpRequest.newBuilder()
+                    .uri(URI.create("https://api.github.com/user/emails"))
+                    .header("Authorization", "Bearer " + accessToken)
+                    .header("Accept", "application/vnd.github+json")
+                    .GET()
+                    .build();
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(userInfoUrl))
-                .header("Authorization", "Bearer " + accessToken)
-                .GET()
-                .build();
+            HttpResponse<String> emailResponse = client.send(emailRequest, HttpResponse.BodyHandlers.ofString());
+            JSONArray emails = new JSONArray(emailResponse.body());
 
-        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        JSONObject userInfo = new JSONObject(response.body());
+            // Trouver l'email principal
+            for (int i = 0; i < emails.length(); i++) {
+                JSONObject emailObj = emails.getJSONObject(i);
+                if (emailObj.getBoolean("primary")) {
+                    return emailObj.getString("email");
+                }
+            }
+            throw new RuntimeException("No primary email found for GitHub user");
+        } else {
+            // Code existant pour Google
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create("https://www.googleapis.com/oauth2/v3/userinfo"))
+                    .header("Authorization", "Bearer " + accessToken)
+                    .GET()
+                    .build();
 
-        return userInfo.getString("email");
+            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            JSONObject userInfo = new JSONObject(response.body());
+            return userInfo.getString("email");
+        }
     }
 
     private String getGoogleUserName(String accessToken) throws IOException, InterruptedException {
@@ -494,6 +513,7 @@ public class SignupController {
 
     @Configuration
     public class CorsConfig implements WebMvcConfigurer {
+
         @Override
         public void addCorsMappings(CorsRegistry registry) {
             registry.addMapping("/**")
