@@ -32,15 +32,32 @@ public class ProjectController {
             long startDate = projectJson.optLong("startDate", 0);
             long endDate = projectJson.optLong("endDate", 0);
 
+            // Validations côté serveur
+            if (projectName == null || projectName.trim().isEmpty()) {
+                return ResponseEntity.status(400).body("{\"error\": \"Le nom du projet est requis.\"}");
+            }
+            if (type == null || type.trim().isEmpty()) {
+                return ResponseEntity.status(400).body("{\"error\": \"Le type de projet est requis.\"}");
+            }
+            if (uid == null || uid.trim().isEmpty()) {
+                return ResponseEntity.status(400).body("{\"error\": \"L'UID de l'utilisateur est requis.\"}");
+            }
+            if (startDate != 0 && endDate != 0 && startDate >= endDate) {
+                return ResponseEntity.status(400).body("{\"error\": \"La date de fin doit être après la date de début.\"}");
+            }
+            if (durationValue < 0) {
+                return ResponseEntity.status(400).body("{\"error\": \"La durée ne peut pas être négative.\"}");
+            }
+
             // Créer un document dans Firestore
             Firestore db = FirestoreClient.getFirestore();
             Map<String, Object> projectMap = new HashMap<>();
             projectMap.put("projectName", projectName);
             projectMap.put("description", description);
             projectMap.put("type", type);
-            projectMap.put("uid", uid); // Référence à l'utilisateur
+            projectMap.put("uid", uid);
             projectMap.put("createdAt", System.currentTimeMillis());
-            if (durationUnit != null) {
+            if (durationUnit != null && durationValue > 0) {
                 projectMap.put("durationUnit", durationUnit);
                 projectMap.put("durationValue", durationValue);
             }
